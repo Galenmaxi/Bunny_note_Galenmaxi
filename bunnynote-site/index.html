@@ -10,7 +10,7 @@
   <link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect" />
   <link
     href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Nunito+Sans:wght@400;600&family=Plus+Jakarta+Sans:wght@700&display=swap"
-    rel="stylesheet" />p
+    rel="stylesheet" />
   <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap"
     rel="stylesheet" />
   <script id="tailwind-config">
@@ -620,6 +620,30 @@
       color: #fff;
     }
 
+    .note-overdue-row { border-left: 3px solid #ef4444; }
+    .note-done-btn {
+      flex-shrink: 0;
+      opacity: 0;
+      width: 22px;
+      height: 22px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: none;
+      border: 1.5px solid currentColor;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: bold;
+      line-height: 1;
+      transition: opacity 0.15s, background 0.15s, color 0.15s;
+    }
+    #notes-table-body tr:hover .note-done-btn { opacity: 1; }
+    .note-done-btn.is-done { color: #16a34a; }
+    .note-done-btn.is-restore { color: #9ca3af; }
+    .note-done-btn.is-done:hover { background: #16a34a; color: #fff; }
+    .note-done-btn.is-restore:hover { background: #9ca3af; color: #fff; }
+
     .recurring-badge {
       background: #aacaea;
       border: 1.5px solid #191c1d;
@@ -1053,6 +1077,9 @@
       <button onclick="filterNotes('ideas')" id="folder-ideas"
         class="folder-tab retro-cd-label text-label-caps font-label-caps text-on-surface whitespace-nowrap bg-white">💡
         Ideas</button>
+      <button onclick="filterNotes('done')" id="folder-done"
+        class="folder-tab retro-cd-label text-label-caps font-label-caps text-on-surface whitespace-nowrap bg-white">✅
+        Done</button>
     </div>
     <main class="container mx-auto px-4 md:px-12 py-4 max-w-4xl">
       <!-- Card grid view -->
@@ -1557,6 +1584,8 @@
           <div id="note-view-tags" class="flex gap-1 flex-wrap mt-1"></div>
         </div>
         <div class="flex gap-2 items-center">
+          <button id="note-done-btn" onclick=""
+            class="border-2 border-on-surface px-3 py-1 rounded-full font-label-caps text-xs transition-colors">✅ Done</button>
           <button id="note-edit-btn" onclick=""
             class="bg-[#FFF9C4] text-on-surface border-2 border-on-surface px-3 py-1 rounded-full font-label-caps text-xs hover:bg-[#fab3ca] transition-colors">✏️
             Edit</button>
@@ -2245,7 +2274,7 @@
     function filterNotes(folder) {
       currentNoteFolder = folder;
       document.querySelectorAll('.folder-tab').forEach(t => { t.style.background = 'white'; });
-      const activeColors = { all: 'linear-gradient(135deg,#fab3ca,#fdb5cc)', school: 'linear-gradient(135deg,#a7c7e7,#aacaea)', work: 'linear-gradient(135deg,#cce5ff,#a8caea)', personal: 'linear-gradient(135deg,#ffd9e3,#fab3ca)', ideas: 'linear-gradient(135deg,#FFF9C4,#ffe082)' };
+      const activeColors = { all: 'linear-gradient(135deg,#fab3ca,#fdb5cc)', school: 'linear-gradient(135deg,#a7c7e7,#aacaea)', work: 'linear-gradient(135deg,#cce5ff,#a8caea)', personal: 'linear-gradient(135deg,#ffd9e3,#fab3ca)', ideas: 'linear-gradient(135deg,#FFF9C4,#ffe082)', done: 'linear-gradient(135deg,#d4f0d4,#b8e8d8)' };
       const btn = document.getElementById('folder-' + folder);
       if (btn) btn.style.background = activeColors[folder] || 'white';
       renderNotes();
@@ -2332,6 +2361,16 @@
       document.getElementById('note-view-tags').innerHTML = (n.tags || []).map(t => `<span class="tag-pill bg-secondary-container">${t}</span>`).join('');
       document.getElementById('note-edit-btn').onclick = () => editNote(id);
       document.getElementById('note-delete-btn').onclick = () => deleteNote(id);
+      const doneBtn = document.getElementById('note-done-btn');
+      if (n.status === 'done') {
+        doneBtn.textContent = '↩ Restore';
+        doneBtn.className = 'bg-[#e1e3e4] text-on-surface border-2 border-on-surface px-3 py-1 rounded-full font-label-caps text-xs hover:bg-[#d0d0d0] transition-colors';
+        doneBtn.onclick = () => { restoreNote(id); closeModal('modal-note-view'); };
+      } else {
+        doneBtn.textContent = '✅ Done';
+        doneBtn.className = 'bg-[#d4f0d4] text-on-surface border-2 border-on-surface px-3 py-1 rounded-full font-label-caps text-xs hover:bg-[#b8e8d8] transition-colors';
+        doneBtn.onclick = () => { markNoteDone(id); closeModal('modal-note-view'); };
+      }
       openModal('modal-note-view');
     }
     async function deleteNote(id) {
@@ -2343,12 +2382,39 @@
       renderRecentNotes();
       toast('Note deleted 🗑️');
     }
+    async function markNoteDone(id) {
+      const ok = await sbPatch('notes', id, { status: 'done' });
+      if (!ok) { toast('Could not update note 😭'); return; }
+      const n = cache.notes.find(n => n.id === id);
+      if (n) n.status = 'done';
+      renderNotes();
+      renderRecentNotes();
+      renderUpcomingDeadlines();
+      toast('Note marked done ✅');
+    }
+    async function restoreNote(id) {
+      const ok = await sbPatch('notes', id, { status: 'open' });
+      if (!ok) { toast('Could not restore note 😭'); return; }
+      const n = cache.notes.find(n => n.id === id);
+      if (n) n.status = 'open';
+      renderNotes();
+      renderRecentNotes();
+      renderUpcomingDeadlines();
+      toast('Note restored 🔄');
+    }
     const NOTE_COLORS = ['bg-[#FFF9C4]', 'bg-[#ffd9e3]', 'bg-[#cce5ff]', 'bg-[#d4f0d4]', 'bg-white'];
     const NOTE_ROTS = ['-rotate-2', 'rotate-2', '-rotate-1', 'rotate-1', ''];
     let noteDragSrcId = null;
     function renderNotes() {
       const notes = cache.notes;
-      const filtered = currentNoteFolder === 'all' ? notes : notes.filter(n => n.folder === currentNoteFolder);
+      let filtered;
+      if (currentNoteFolder === 'done') {
+        filtered = notes.filter(n => n.status === 'done');
+      } else if (currentNoteFolder === 'all') {
+        filtered = notes.filter(n => n.status !== 'done');
+      } else {
+        filtered = notes.filter(n => n.folder === currentNoteFolder && n.status !== 'done');
+      }
       const grid = document.getElementById('notes-grid');
       const table = document.getElementById('notes-table');
       const tableBody = document.getElementById('notes-table-body');
@@ -2419,10 +2485,12 @@
           // domain badge color based on text
           const domainColors = ['bg-[#fab3ca]', 'bg-[#aacaea]', 'bg-[#b8e8d8]', 'bg-[#d4b8e8]', 'bg-[#FFF9C4]', 'bg-[#ffd9e3]', 'bg-[#cce5ff]'];
           const domainColor = n.domain ? domainColors[Math.abs(n.domain.split('').reduce((a, c) => a + c.charCodeAt(0), 0)) % domainColors.length] : '';
-          return `<tr class="border-b border-outline-variant hover:bg-secondary-container/20 transition-colors group">
+          const isOverdue = n.deadline && n.deadline < today && n.status !== 'done';
+          const isDone = n.status === 'done';
+          return `<tr class="border-b border-outline-variant hover:bg-secondary-container/20 transition-colors group${isOverdue ? ' note-overdue-row' : ''}">
         <td class="px-4 py-3">
           <div class="note-title-cell">
-            <p class="note-title-text font-label-caps text-label-caps text-on-surface">${n.title}</p>
+            <p class="note-title-text font-label-caps text-label-caps text-on-surface${isDone ? ' line-through text-outline' : ''}">${n.title}</p>
             <button class="note-chevron-btn" onclick="viewNote(${n.id})" title="View note content">›</button>
           </div>
         </td>
@@ -2437,7 +2505,13 @@
           ${`<span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-bold ${st.bg} border border-on-surface/10"><span class="w-2 h-2 rounded-full ${st.dot} inline-block"></span>${st.label}</span>`}
         </td>
         <td class="px-3 py-3">
-          <button onclick="deleteNote(${n.id})" class="opacity-0 group-hover:opacity-100 text-outline hover:text-red-400 transition text-sm" style="font-family:sans-serif">✕</button>
+          <div class="flex items-center gap-1">
+            ${isDone
+              ? `<button class="note-done-btn is-restore" onclick="restoreNote(${n.id})" title="Restore to active">↩</button>`
+              : `<button class="note-done-btn is-done" onclick="markNoteDone(${n.id})" title="Mark as done">✓</button>`
+            }
+            <button onclick="deleteNote(${n.id})" class="opacity-0 group-hover:opacity-100 text-outline hover:text-red-400 transition text-sm" style="font-family:sans-serif">✕</button>
+          </div>
         </td>
       </tr>`;
         }).join('') || `<tr><td colspan="6" class="px-4 py-8 text-center text-outline font-body-md">nothing here yet 🐰</td></tr>`;
@@ -2485,7 +2559,7 @@
     function folderEmoji(f) { const m = { school: '📘', work: '💼', personal: '🐰', ideas: '💡' }; return m[f] || '📝'; }
     function addDays(dateStr, days) { const d = new Date(dateStr); d.setDate(d.getDate() + days); return d.toISOString().split('T')[0]; }
     function renderRecentNotes() {
-      const notes = cache.notes.slice(0, 2);
+      const notes = cache.notes.filter(n => n.status !== 'done').slice(0, 2);
       const container = document.getElementById('recent-notes');
       if (!container) return;
       const rots = ['transform -rotate-3', 'transform rotate-2'];

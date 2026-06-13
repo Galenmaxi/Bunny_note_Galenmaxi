@@ -130,12 +130,20 @@ netlify/
 ### Notes Page
 - **Card view** (default) — polaroid-style grid, drag to reorder
 - **Table view** (toggle) — Notion-style deadline table:
-  - Columns: Name, Domain, Due Date, Days Left, Status, Notes
+  - Columns: Name (with `›` chevron to open view modal), Domain, Due Date, Days Left, Status, Actions
   - Sorted by deadline ascending
   - Status: 🔴 due / ⚪ tentative / ✅ done / 📂 open
-- Folder tabs: All / 📘 School / 💼 Work / 🐰 Personal / 💡 Ideas
+  - **Overdue rows** get a red left border (`note-overdue-row`) when `deadline < today && status !== 'done'`
+  - Hover `✓` button to mark a note done; hover `↩` button in Done tab to restore
+  - Delete `✕` button visible on row hover
+- Folder tabs: All / 📘 School / 💼 Work / 🐰 Personal / 💡 Ideas / ✅ Done
+  - **All / folder tabs** exclude `status === 'done'` notes
+  - **✅ Done tab** shows only `status === 'done'` notes
 - Rich text editor (bold, italic, underline, bullet, numbered, checkbox)
-- Note view modal (tap card to read full content)
+- Note view modal (tap card or chevron to read full content)
+  - View modal has **✅ Done / ↩ Restore** button that patches status in Supabase then re-renders
+- `markNoteDone(id)` — patches `status: 'done'`, updates cache, re-renders notes + home + deadlines
+- `restoreNote(id)` — patches `status: 'open'`, updates cache, re-renders notes + home + deadlines
 
 ### Goals Page
 - Goal cards with cassette-style progress bars (+1/+5/-1 buttons)
@@ -213,6 +221,11 @@ The `setAccent(name, hex)` function injects a `<style id="theme-override">` tag 
 .streak-bunny          — bunny that runs across screen on streak milestone
 .confetti-piece        — falling confetti on streak celebration
 .ppg-loader            — loading screen character animation (ppgBounce keyframe)
+.note-title-cell       — flex container for title + chevron in table row (height: 52px)
+.note-title-text       — ellipsis-clipped title text (flex:1, min-width:0)
+.note-chevron-btn      — round › button, hidden until row hover, opens view modal
+.note-overdue-row      — red left border (3px solid #ef4444) on overdue table rows
+.note-done-btn         — round ✓/↩ button, hidden until row hover; .is-done (green) or .is-restore (grey)
 ```
 
 ### Loading Screen
@@ -287,21 +300,25 @@ On every app load, `checkRecurringResets()` runs and creates fresh Supabase task
 
 ---
 
-## 🐛 Bugs Fixed in May 2026 Session
+## 🐛 Bugs Fixed
 
-1. **Modal overlay always visible** — Critical CSS bug: `.modal-overlay { display: flex }` was overriding Tailwind's `.hidden { display: none }` (same specificity, custom CSS won). Fixed by splitting into `.modal-overlay` (no display) + `.modal-overlay:not(.hidden) { display: flex }`. **Never revert this fix.**
+### May 2026 Session
+1. **Modal overlay always visible** — Critical CSS bug: `.modal-overlay { display: flex }` was overriding Tailwind's `.hidden { display: none }`. Fixed: `.modal-overlay:not(.hidden) { display: flex }`. **Never revert.**
 
 2. **Recurring tasks not resetting** — `setTimeout(24h)` died on browser close. Fixed with localStorage tracking + `checkRecurringResets()` on load.
 
 3. **`setAccent()` did nothing** — The function only showed a toast. Now properly applies CSS overrides.
 
-4. **Stray byte before DOCTYPE** — PowerShell encoding operations introduced a `?` character before `<!DOCTYPE html>`, triggering browser quirks mode and breaking the entire UI. Fixed by stripping the byte.
+4. **Stray byte before DOCTYPE** — PowerShell encoding operations introduced a `?` character before `<!DOCTYPE html>`, triggering browser quirks mode. Fixed by stripping the byte.
 
-5. **UTF-8 BOM added by PowerShell** — `[System.IO.File]::WriteAllText` with `Encoding.UTF8` adds a BOM. Removed with `WriteAllBytes` of bytes starting at offset 3.
+5. **UTF-8 BOM added by PowerShell** — `WriteAllText` with `Encoding.UTF8` adds a BOM. Fixed: use `WriteAllBytes` starting at offset 3.
 
-6. **Orphaned JS code from regex removal** — PowerShell regex removal of `initBrief()` left orphaned `} catch { } / } / }` outside any function, causing a script-wide syntax error. Fixed by manually deleting those lines.
+6. **Orphaned JS code from regex removal** — PowerShell regex removal of `initBrief()` left orphaned `} catch { }` lines outside any function, causing a script-wide syntax error. Fixed manually with Edit tool.
 
-7. **Encoding corruption** — Multiple rounds of PowerShell `Get-Content` (ANSI) + `Set-Content -Encoding utf8` corrupted emoji/special chars. Fixed by CP1252 round-trip: `UTF8.GetString(bytes)` → `CP1252.GetBytes(string)` → `WriteAllBytes`.
+7. **Encoding corruption** — Multiple rounds of `Get-Content` (ANSI) + `Set-Content -Encoding utf8` corrupted emoji/special chars. Fixed by CP1252 round-trip.
+
+### June 2026 Session
+8. **`renderRecentNotes()` showed done notes on home page** — `cache.notes.slice(0, 2)` pulled the first 2 notes from full cache without filtering by status. Fixed: `.filter(n => n.status !== 'done').slice(0, 2)`.
 
 ---
 
@@ -368,7 +385,8 @@ Run these before making ANY changes:
    → showPage, openModal, closeModal, init, renderHome,
      renderTasks, renderNotes, renderGoals, renderCalendar,
      pomodoroStartStop, renderStats, checkRecurringResets,
-     loadCustomBg, checkDueBanner
+     loadCustomBg, checkDueBanner, markNoteDone, restoreNote,
+     filterNotes, renderRecentNotes, renderUpcomingDeadlines
 
 9. Supabase constants present
    → SB_URL = 'https://edyzybrukvleundcttzw.supabase.co'
@@ -394,5 +412,6 @@ Run these before making ANY changes:
 
 ---
 
-*Last updated: May 2026 — updated from Claude Code session*  
-*Covers all changes made in the May 2026 session (modal fix, recurring fix, themes, loading screen, header fix, AI removal, UI polish)*
+*Last updated: June 2026 — updated from Claude Code session*  
+*May 2026: modal fix, recurring fix, themes, loading screen, header fix, AI removal, UI polish*  
+*June 2026: Notes table redesign (chevron-to-modal, removed Notes column), Done/Archive tab for notes, overdue row highlighting, renderRecentNotes bug fix*
