@@ -1,12 +1,3 @@
 [build]
   command = ""
   publish = "."
-  functions = "netlify/functions"
-
-[build.environment]
-  NODE_VERSION = "18"
-
-[[redirects]]
-  from = "/api/brief"
-  to = "/.netlify/functions/brief"
-  status = 200
