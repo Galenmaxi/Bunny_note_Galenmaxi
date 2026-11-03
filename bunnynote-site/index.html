@@ -1449,6 +1449,20 @@
           </div>
         </div>
         <hr class="border-outline-variant" />
+        <div>
+          <p class="font-label-caps text-label-caps text-on-surface mb-2">💾 Backup</p>
+          <div class="flex gap-2">
+            <button onclick="exportData()"
+              class="flex-1 border-2 border-on-surface text-on-surface py-2 rounded-lg font-label-caps text-label-caps hover:bg-[#cce5ff] transition-colors">⬇️
+              Export</button>
+            <button onclick="document.getElementById('import-file').click()"
+              class="flex-1 border-2 border-on-surface text-on-surface py-2 rounded-lg font-label-caps text-label-caps hover:bg-[#d4f0d4] transition-colors">⬆️
+              Import</button>
+          </div>
+          <input id="import-file" type="file" accept="application/json,.json" class="hidden"
+            onchange="importData(this.files[0]); this.value = ''" />
+          <p class="text-[11px] text-outline font-body-md mt-1">Export saves everything to a file on this device. Do it now and then 🐰</p>
+        </div>
         <button onclick="clearAllData()"
           class="w-full border-2 border-on-surface text-on-surface py-2 rounded-lg font-label-caps text-label-caps hover:bg-[#ffdad6] transition-colors">🗑️
           Clear all data</button>
@@ -1995,6 +2009,76 @@
       const t = THEMES[name];
       toast(`${t ? t.label : name} theme applied ✨`);
     }
+    // ===== EXPORT / IMPORT =====
+    // Export works offline too (it uses whatever is on screen, including the offline snapshot).
+    function exportData() {
+      const habit_completions = [];
+      for (const [habitId, days] of Object.entries(cache.habitDots || {}))
+        for (const [completed_date, done] of Object.entries(days))
+          if (done) habit_completions.push({ habit_id: Number(habitId), completed_date });
+      const settings = [];
+      if (cache.name) settings.push({ key: 'name', value: cache.name });
+      if (cache.mood) settings.push({ key: 'mood', value: cache.mood });
+      if (cache.focus) settings.push({ key: 'focus', value: JSON.stringify(cache.focus) });
+      if (cache.reflection) settings.push({ key: 'reflection', value: cache.reflection });
+      if (cache.cats) settings.push({ key: 'cats', value: JSON.stringify(cache.cats) });
+      const backup = {
+        app: 'bunnynote', version: 1, exportedAt: new Date().toISOString(),
+        data: { tasks: cache.tasks, notes: cache.notes, goals: cache.goals, habits: cache.habits, habit_completions, projects: cache.projects, settings }
+      };
+      const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }));
+      const a = document.createElement('a');
+      a.href = url; a.download = `bunnynote-backup-${todayStr()}.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast('Backup downloaded 💾');
+    }
+
+    async function importData(file) {
+      if (!file) return;
+      if (dbOffline) { toast("Can't import while the database is offline 📴"); return; }
+      let backup;
+      try { backup = JSON.parse(await file.text()); } catch { toast('That file is not a valid backup 😭'); return; }
+      const d = backup?.data;
+      if (backup?.app !== 'bunnynote' || !d) { toast('That file is not a Bunnynote backup 😭'); return; }
+      const n = k => (Array.isArray(d[k]) ? d[k].length : 0);
+      if (!confirm(`Import ${n('tasks')} tasks, ${n('notes')} notes, ${n('goals')} goals, ${n('habits')} habits and ${n('projects')} projects?\n\nThis ADDS to what is already here (it doesn't replace anything).`)) return;
+
+      showLoading('Importing your backup... 🐰');
+      // Drop ids (the database assigns new ones) and give every row the same keys,
+      // because a bulk insert rejects rows with different key sets.
+      const strip = rows => {
+        const clean = (rows || []).map(({ id, ...rest }) => rest);
+        const keys = [...new Set(clean.flatMap(Object.keys))];
+        const now = new Date().toISOString();
+        return clean.map(r => Object.fromEntries(keys.map(k => [k, r[k] !== undefined ? r[k] : (k === 'created_at' ? now : null)])));
+      };
+      const failed = [];
+      try {
+        for (const table of ['tasks', 'notes', 'goals', 'projects']) {
+          const rows = strip(d[table]);
+          if (rows.length && (await sbPost(table, rows)) === null) failed.push(table);
+        }
+        // Habits one by one so completions can be pointed at the new habit ids.
+        const habitIdMap = {};
+        for (const h of d.habits || []) {
+          const { id, ...rest } = h;
+          const created = await sbPost('habits', rest);
+          if (created) habitIdMap[id] = created.id; else failed.push(`habit "${h.name}"`);
+        }
+        const completions = (d.habit_completions || [])
+          .filter(c => habitIdMap[c.habit_id] !== undefined)
+          .map(c => ({ habit_id: habitIdMap[c.habit_id], completed_date: c.completed_date }));
+        if (completions.length && (await sbPost('habit_completions', completions)) === null) failed.push('habit history');
+        for (const s of d.settings || [])
+          if (!await sbSetSetting(s.key, s.value)) failed.push(`setting "${s.key}"`);
+      } finally {
+        hideLoading();
+      }
+      if (failed.length) { alert(`Import finished, but these could not be saved:\n${failed.join('\n')}`); }
+      location.reload();
+    }
+
     async function clearAllData() {
       if (!confirm('Clear ALL data? This cannot be undone! 😭')) return;
       showLoading('Clearing data...');
