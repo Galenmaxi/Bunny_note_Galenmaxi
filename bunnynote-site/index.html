@@ -1722,31 +1722,39 @@
     const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVkeXp5YnJ1a3ZsZXVuZGN0dHp3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk1Mjc3NDYsImV4cCI6MjA5NTEwMzc0Nn0.q-wqH1Fj-f68I422wDKrLAHVWk_5m5lwBtVUFN1TsHg';
     const HEADERS = { 'Content-Type': 'application/json', 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Prefer': 'return=representation' };
 
+    // Every helper reports failure: sbGet -> null, sbPost -> null, the rest -> false.
+    // Callers must check the result before updating the UI or telling the user it saved.
     async function sbGet(table, params = '') {
       const url = `${SB_URL}/rest/v1/${table}?select=*&${params}&order=id.asc`;
       try {
         const res = await fetch(url, { headers: HEADERS });
-        if (!res.ok) { const e = await res.text(); console.error(`sbGet ${table} error:`, e); return []; }
-        return res.json();
-      } catch (e) { console.error(`sbGet ${table} network error:`, e); return []; }
+        if (!res.ok) { const e = await res.text(); console.error(`sbGet ${table} error:`, e); return null; }
+        return await res.json();
+      } catch (e) { console.error(`sbGet ${table} network error:`, e); return null; }
     }
     async function sbPost(table, body) {
       try {
         const res = await fetch(`${SB_URL}/rest/v1/${table}`, { method: 'POST', headers: { ...HEADERS, 'Prefer': 'return=representation' }, body: JSON.stringify(body) });
         if (!res.ok) { const e = await res.text(); console.error('sbPost error', e); return null; }
         const data = await res.json();
-        return Array.isArray(data) ? data[0] : data;
+        scheduleSnapshot();
+        return Array.isArray(data) ? (data.length > 1 ? data : data[0]) : data;
       } catch (e) { console.error('sbPost network error:', e); return null; }
     }
     async function sbPatch(table, id, body) {
       try {
         const res = await fetch(`${SB_URL}/rest/v1/${table}?id=eq.${id}`, { method: 'PATCH', headers: HEADERS, body: JSON.stringify(body) });
+        if (res.ok) scheduleSnapshot(); else console.error('sbPatch error', await res.text());
         return res.ok;
       } catch (e) { console.error('sbPatch error:', e); return false; }
     }
     async function sbDelete(table, id) {
+      return sbDeleteWhere(table, `id=eq.${id}`);
+    }
+    async function sbDeleteWhere(table, query) {
       try {
-        const res = await fetch(`${SB_URL}/rest/v1/${table}?id=eq.${id}`, { method: 'DELETE', headers: HEADERS });
+        const res = await fetch(`${SB_URL}/rest/v1/${table}?${query}`, { method: 'DELETE', headers: HEADERS });
+        if (res.ok) scheduleSnapshot(); else console.error('sbDelete error', await res.text());
         return res.ok;
       } catch (e) { console.error('sbDelete error:', e); return false; }
     }
@@ -1759,10 +1767,67 @@
       } catch (e) { return null; }
     }
     async function sbSetSetting(key, value) {
-      try {
-        await fetch(`${SB_URL}/rest/v1/settings?key=eq.${key}`, { method: 'DELETE', headers: HEADERS });
-        await sbPost('settings', { key, value: String(value) });
-      } catch (e) { console.error('sbSetSetting error:', e); }
+      // TODO(FIX-PLAN 4.1): replace with a single upsert once settings.key is unique.
+      if (!await sbDeleteWhere('settings', `key=eq.${encodeURIComponent(key)}`)) return false;
+      return (await sbPost('settings', { key, value: String(value) })) !== null;
+    }
+
+    // ===== SAVE-FAILURE FEEDBACK =====
+    let dbOffline = false;
+    let lastFailToast = 0;
+    function saveFailed(what = 'that') {
+      // Throttled so a burst of failed writes shows one message, not five.
+      if (Date.now() - lastFailToast < 2500) return;
+      lastFailToast = Date.now();
+      toast(dbOffline
+        ? `Offline: couldn't save ${what}. Nothing was changed 📴`
+        : `Couldn't save ${what}, please try again 😭`);
+    }
+
+    // ===== LOCAL SNAPSHOT =====
+    // A copy of the last data successfully loaded from or saved to Supabase.
+    // If the database is unreachable the app shows this (read-only) instead of an empty account.
+    const SNAPSHOT_KEY = 'bn_snapshot';
+    let snapshotTimer = null;
+    function scheduleSnapshot() {
+      // Runs after the caller has applied its change to `cache`.
+      clearTimeout(snapshotTimer);
+      snapshotTimer = setTimeout(saveSnapshot, 400);
+    }
+    function snapshotData() {
+      const { tasks, notes, goals, habits, projects, habitDots, name, mood, focus, reflection, cats } = cache;
+      return { tasks, notes, goals, habits, projects, habitDots, name, mood, focus, reflection, cats };
+    }
+    function saveSnapshot() {
+      if (dbOffline) return; // never overwrite the good copy with an offline/empty state
+      try { localStorage.setItem(SNAPSHOT_KEY, JSON.stringify({ savedAt: new Date().toISOString(), data: snapshotData() })); }
+      catch (e) { console.warn('snapshot not saved (storage full?)', e); }
+    }
+    function loadSnapshot() {
+      try { return JSON.parse(localStorage.getItem(SNAPSHOT_KEY)); } catch { return null; }
+    }
+    function showOfflineBanner(savedAt) {
+      if (document.getElementById('offline-banner')) return;
+      const when = savedAt ? new Date(savedAt).toLocaleString() : null;
+      const el = document.createElement('div');
+      el.id = 'offline-banner';
+      el.setAttribute('role', 'alert');
+      el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:998;background:#ffdad6;color:#410002;border-bottom:2px solid #191c1d;padding:6px 16px;font:600 12px/1.35 "Nunito Sans",sans-serif;display:flex;gap:10px;align-items:center;justify-content:center;text-align:left';
+      const msg = document.createElement('span');
+      msg.textContent = when
+        ? `📴 Can't reach the database. Showing your saved copy from ${when}. Changes won't save.`
+        : `📴 Can't reach the database and there's no saved copy on this device yet. Changes won't save.`;
+      const btn = document.createElement('button');
+      btn.textContent = 'Retry';
+      btn.style.cssText = 'flex-shrink:0;border:2px solid #191c1d;border-radius:9999px;padding:2px 12px;background:#fff;font-weight:700';
+      btn.onclick = () => location.reload();
+      el.append(msg, btn);
+      document.body.appendChild(el);
+      // Push the fixed header and the page down so the banner doesn't cover the top buttons.
+      const h = el.offsetHeight;
+      const header = document.querySelector('header');
+      if (header) header.style.top = h + 'px';
+      document.body.style.paddingTop = h + 'px';
     }
 
     // ===== LOCAL CACHE (for fast UI while Supabase loads) =====
@@ -1869,15 +1934,15 @@
     }
     async function saveSettings() {
       const name = document.getElementById('setting-name').value.trim() || 'Galen';
-      cache.name = name;
       const cats = {
         academic: document.getElementById('cat-academic').value.trim() || DEFAULT_CATS.academic,
         creative: document.getElementById('cat-creative').value.trim() || DEFAULT_CATS.creative,
         life: document.getElementById('cat-life').value.trim() || DEFAULT_CATS.life,
       };
+      const ok = await sbSetSetting('name', name) && await sbSetSetting('cats', JSON.stringify(cats));
+      if (!ok) { saveFailed('settings'); return; }
+      cache.name = name;
       cache.cats = cats;
-      await sbSetSetting('name', name);
-      await sbSetSetting('cats', JSON.stringify(cats));
       updateGreeting();
       updateCategoryLabels();
       closeModal('modal-settings');
@@ -1933,27 +1998,30 @@
     async function clearAllData() {
       if (!confirm('Clear ALL data? This cannot be undone! 😭')) return;
       showLoading('Clearing data...');
-      await Promise.all([
-        fetch(`${SB_URL}/rest/v1/tasks?id=gt.0`, { method: 'DELETE', headers: HEADERS }),
-        fetch(`${SB_URL}/rest/v1/notes?id=gt.0`, { method: 'DELETE', headers: HEADERS }),
-        fetch(`${SB_URL}/rest/v1/goals?id=gt.0`, { method: 'DELETE', headers: HEADERS }),
-        fetch(`${SB_URL}/rest/v1/habits?id=gt.0`, { method: 'DELETE', headers: HEADERS }),
-        fetch(`${SB_URL}/rest/v1/projects?id=gt.0`, { method: 'DELETE', headers: HEADERS }),
-        fetch(`${SB_URL}/rest/v1/settings?key=neq.x`, { method: 'DELETE', headers: HEADERS }),
-        fetch(`${SB_URL}/rest/v1/habit_completions?id=gt.0`, { method: 'DELETE', headers: HEADERS }),
+      // completions first: they reference habits
+      const okCompletions = await sbDeleteWhere('habit_completions', 'id=gt.0');
+      const oks = await Promise.all([
+        sbDeleteWhere('tasks', 'id=gt.0'),
+        sbDeleteWhere('notes', 'id=gt.0'),
+        sbDeleteWhere('goals', 'id=gt.0'),
+        sbDeleteWhere('habits', 'id=gt.0'),
+        sbDeleteWhere('projects', 'id=gt.0'),
+        sbDeleteWhere('settings', 'key=neq.x'),
       ]);
       hideLoading();
+      if (!okCompletions || oks.includes(false)) { toast('Some data could not be cleared 😭 try again'); return; }
+      localStorage.removeItem(SNAPSHOT_KEY);
       location.reload();
     }
 
     // ===== MOOD =====
     const MOOD_LABELS = { '😭': 'rough day...', '😔': 'a little down', '😐': 'it\'s okay', '✨': 'feeling it!', '😎': 'absolutely thriving' };
     async function selectMood(btn, emoji) {
+      if (!await sbSetSetting('mood', emoji)) { saveFailed('your mood'); return; }
       document.querySelectorAll('.vibe-btn').forEach(b => b.classList.remove('bg-primary-container', 'border', 'border-on-surface'));
       btn.classList.add('bg-primary-container', 'border', 'border-on-surface');
       cache.mood = emoji;
       document.getElementById('mood-label').textContent = MOOD_LABELS[emoji] || '';
-      await sbSetSetting('mood', emoji);
       pushNotif(`Vibe check: ${emoji} — ${MOOD_LABELS[emoji]}`);
     }
     function initMood() {
@@ -1979,8 +2047,8 @@
         document.getElementById('focus2').value.trim(),
         document.getElementById('focus3').value.trim()
       ];
+      if (!await sbSetSetting('focus', JSON.stringify(f))) { saveFailed('your focus'); return; }
       cache.focus = f;
-      await sbSetSetting('focus', JSON.stringify(f));
       renderFocusCards();
       closeModal('modal-focus');
       toast('Focus updated 📌');
@@ -2052,14 +2120,15 @@
       const name = input.value.trim();
       if (!name) return;
       const result = await sbPost('habits', { name });
-      if (result) { cache.habits.push({ id: result.id, name }); cache.habitDots[result.id] = {}; }
+      if (!result) { saveFailed('the habit'); return; }
+      cache.habits.push({ id: result.id, name }); cache.habitDots[result.id] = {};
       input.value = '';
       renderHabitsModal();
       initHabits();
       toast(`Habit "${name}" added 🩷`);
     }
     async function deleteHabit(id) {
-      await sbDelete('habits', id);
+      if (!await sbDelete('habits', id)) { saveFailed('the delete'); return; }
       cache.habits = cache.habits.filter(h => h.id !== id);
       delete cache.habitDots[id];
       renderHabitsModal();
@@ -2093,14 +2162,11 @@
       const today = todayStr();
       if (!cache.habitDots[id]) cache.habitDots[id] = {};
       const done = cache.habitDots[id][today];
-      if (done) {
-        // delete completion
-        await fetch(`${SB_URL}/rest/v1/habit_completions?habit_id=eq.${id}&completed_date=eq.${today}`, { method: 'DELETE', headers: HEADERS });
-        cache.habitDots[id][today] = false;
-      } else {
-        await sbPost('habit_completions', { habit_id: id, completed_date: today });
-        cache.habitDots[id][today] = true;
-      }
+      const ok = done
+        ? await sbDeleteWhere('habit_completions', `habit_id=eq.${id}&completed_date=eq.${today}`)
+        : (await sbPost('habit_completions', { habit_id: id, completed_date: today })) !== null;
+      if (!ok) { saveFailed('your habit'); return; }
+      cache.habitDots[id][today] = !done;
       renderHabitsModal();
       renderHabitTrackerGrid();
       initHabits();
@@ -2130,13 +2196,11 @@
     async function toggleHabitDay(id, ds) {
       if (!cache.habitDots[id]) cache.habitDots[id] = {};
       const done = cache.habitDots[id][ds];
-      if (done) {
-        await fetch(`${SB_URL}/rest/v1/habit_completions?habit_id=eq.${id}&completed_date=eq.${ds}`, { method: 'DELETE', headers: HEADERS });
-        cache.habitDots[id][ds] = false;
-      } else {
-        await sbPost('habit_completions', { habit_id: id, completed_date: ds });
-        cache.habitDots[id][ds] = true;
-      }
+      const ok = done
+        ? await sbDeleteWhere('habit_completions', `habit_id=eq.${id}&completed_date=eq.${ds}`)
+        : (await sbPost('habit_completions', { habit_id: id, completed_date: ds })) !== null;
+      if (!ok) { saveFailed('your habit'); return; }
+      cache.habitDots[id][ds] = !done;
       renderHabitTrackerGrid();
       initHabits();
     }
@@ -2150,10 +2214,11 @@
       const deadline = document.getElementById('task-deadline')?.value || null;
       const text = input.value.trim();
       if (!text) return;
+      const result = await sbPost('tasks', { text, cat, priority, done: false, recurring, deadline });
+      if (!result) { saveFailed('the task'); return; } // keep what was typed
       input.value = '';
       document.getElementById('task-deadline').value = '';
-      const result = await sbPost('tasks', { text, cat, priority, done: false, recurring, deadline });
-      if (result) cache.tasks.push({ id: result.id, text, cat, priority, done: false, recurring, deadline });
+      cache.tasks.push({ id: result.id, text, cat, priority, done: false, recurring, deadline });
       renderTasks();
       updateTaskProgress();
       pushNotif(`New task added: "${text}"`);
@@ -2162,8 +2227,8 @@
     async function toggleTask(id) {
       const t = cache.tasks.find(t => t.id === id);
       if (!t) return;
+      if (!await sbPatch('tasks', id, { done: !t.done })) { saveFailed('the task'); renderTasks(); return; }
       t.done = !t.done;
-      await sbPatch('tasks', id, { done: t.done });
       if (t.done && t.recurring) {
         const label = t.recurring === 'daily' ? 'tomorrow' : 'next week';
         toast(`🔁 Recurring task will reappear ${label}!`);
@@ -2178,7 +2243,7 @@
       updateTaskProgress();
     }
     async function deleteTask(id) {
-      await sbDelete('tasks', id);
+      if (!await sbDelete('tasks', id)) { saveFailed('the delete'); return; }
       cache.tasks = cache.tasks.filter(t => t.id !== id);
       renderTasks();
       updateTaskProgress();
@@ -2335,10 +2400,9 @@
 
       if (editingNoteId) {
         const ok = await sbPatch('notes', editingNoteId, { title, folder, content, tags, deadline, domain, status });
-        if (ok) {
-          const idx = cache.notes.findIndex(n => n.id === editingNoteId);
-          if (idx !== -1) Object.assign(cache.notes[idx], { title, folder, content, tags, deadline, domain, status });
-        }
+        if (!ok) { saveFailed('the note'); return; } // editor stays open, nothing lost
+        const idx = cache.notes.findIndex(n => n.id === editingNoteId);
+        if (idx !== -1) Object.assign(cache.notes[idx], { title, folder, content, tags, deadline, domain, status });
         closeNoteEditModal();
         renderNotes();
         renderRecentNotes();
@@ -2348,7 +2412,8 @@
       }
 
       const result = await sbPost('notes', { title, folder, content, tags, deadline, domain, status });
-      if (result) cache.notes.unshift({ id: result.id, title, folder, content, tags, deadline, domain, status, created_at: result.created_at });
+      if (!result) { saveFailed('the note'); return; } // editor stays open, nothing lost
+      cache.notes.unshift({ id: result.id, title, folder, content, tags, deadline, domain, status, created_at: result.created_at });
       closeNoteEditModal();
       renderNotes();
       renderRecentNotes();
@@ -2381,7 +2446,7 @@
     }
     async function deleteNote(id) {
       if (!confirm('Delete this note?')) return;
-      await sbDelete('notes', id);
+      if (!await sbDelete('notes', id)) { saveFailed('the delete'); return; }
       cache.notes = cache.notes.filter(n => n.id !== id);
       closeModal('modal-note-view');
       renderNotes();
@@ -2586,7 +2651,8 @@
       if (!title) { toast('Please add a goal title 🐰'); return; }
       const body = { title, current_val: Number(document.getElementById('goal-current').value) || 0, target_val: Number(document.getElementById('goal-target').value) || 10, unit: document.getElementById('goal-unit').value.trim(), deadline: document.getElementById('goal-deadline').value || null };
       const result = await sbPost('goals', body);
-      if (result) cache.goals.push({ id: result.id, ...body });
+      if (!result) { saveFailed('the goal'); return; }
+      cache.goals.push({ id: result.id, ...body });
       closeModal('modal-goal-new');
       ['goal-title', 'goal-unit', 'goal-deadline'].forEach(id => document.getElementById(id).value = '');
       document.getElementById('goal-current').value = '0';
@@ -2598,14 +2664,15 @@
     async function updateGoalProgress(id, delta) {
       const g = cache.goals.find(g => g.id === id);
       if (!g) return;
-      g.current_val = Math.max(0, Math.min(g.target_val, g.current_val + delta));
-      await sbPatch('goals', id, { current_val: g.current_val });
+      const next = Math.max(0, Math.min(g.target_val, g.current_val + delta));
+      if (!await sbPatch('goals', id, { current_val: next })) { saveFailed('your progress'); return; }
+      g.current_val = next;
       renderGoals();
       if (g.current_val >= g.target_val) { pushNotif(`🎉 Goal completed: "${g.title}"!`); toast('Goal completed! 🎉🐰'); }
     }
     async function deleteGoal(id) {
       if (!confirm('Delete this goal?')) return;
-      await sbDelete('goals', id);
+      if (!await sbDelete('goals', id)) { saveFailed('the delete'); return; }
       cache.goals = cache.goals.filter(g => g.id !== id);
       renderGoals();
       toast('Goal deleted 🗑️');
@@ -2642,8 +2709,8 @@
     }
     async function saveReflection() {
       const val = document.getElementById('reflection-input').value;
+      if (!await sbSetSetting('reflection', val)) { saveFailed('your reflection'); return; }
       cache.reflection = val;
-      await sbSetSetting('reflection', val);
       toast('Reflection saved 🌸');
     }
 
@@ -2653,7 +2720,8 @@
       if (!name) { toast('Please add a project name 🐰'); return; }
       const cat = document.getElementById('project-cat').value;
       const result = await sbPost('projects', { name, cat });
-      if (result) cache.projects.push({ id: result.id, name, cat });
+      if (!result) { saveFailed('the project'); return; }
+      cache.projects.push({ id: result.id, name, cat });
       closeModal('modal-project');
       document.getElementById('project-name').value = '';
       renderProjectList();
@@ -2661,7 +2729,7 @@
       toast('Project added 🎞️');
     }
     async function deleteProject(id) {
-      await sbDelete('projects', id);
+      if (!await sbDelete('projects', id)) { saveFailed('the delete'); return; }
       cache.projects = cache.projects.filter(p => p.id !== id);
       renderProjectList();
     }
@@ -2688,9 +2756,10 @@
       const input = document.getElementById('quick-note-input');
       const text = input.value.trim();
       if (!text) return;
-      input.value = '';
       const result = await sbPost('notes', { title: text, folder: 'personal', content: '', tags: ['#quick'] });
-      if (result) cache.notes.unshift({ id: result.id, title: text, folder: 'personal', content: '', tags: ['#quick'], created_at: result.created_at });
+      if (!result) { saveFailed('the note'); return; }
+      input.value = '';
+      cache.notes.unshift({ id: result.id, title: text, folder: 'personal', content: '', tags: ['#quick'], created_at: result.created_at });
       renderRecentNotes();
       toast('Quick note saved 📝');
     }
@@ -3249,7 +3318,8 @@
         const shouldReset = info.recurring === 'daily' ? days >= 1 : days >= 7;
         if (shouldReset) {
           const newTask = await sbPost('tasks', { text: info.text, cat: info.cat, priority: info.priority, done: false, recurring: info.recurring });
-          if (newTask) cache.tasks.push({ id: newTask.id, text: info.text, cat: info.cat, priority: info.priority, done: false, recurring: info.recurring });
+          if (!newTask) continue; // keep it queued; retry on next load
+          cache.tasks.push({ id: newTask.id, text: info.text, cat: info.cat, priority: info.priority, done: false, recurring: info.recurring });
           toRemove.push(id);
         }
       }
@@ -3264,7 +3334,7 @@
       showLoading('Loading your bunnynote... 🐰');
 
       try {
-        const [tasks, notes, goals, habits, completions, projects, settings] = await Promise.all([
+        const results = await Promise.all([
           sbGet('tasks', ''),
           sbGet('notes', 'order=id.desc'),
           sbGet('goals', ''),
@@ -3273,6 +3343,16 @@
           sbGet('projects', ''),
           sbGet('settings', '')
         ]);
+        const [tasks, notes, goals, habits, completions, projects, settings] = results;
+
+        if (results.some(r => r === null)) {
+          // Database unreachable (or a table errored). Don't pretend the account is empty.
+          dbOffline = true;
+          const snap = loadSnapshot();
+          if (snap?.data) Object.assign(cache, snap.data);
+          showOfflineBanner(snap?.savedAt);
+          throw new Error('offline');
+        }
 
         cache.tasks = tasks || [];
         cache.notes = notes || [];
@@ -3303,16 +3383,19 @@
           console.log(`✅ Loaded: ${tasks.length} tasks, ${notes.length} notes, ${goals.length} goals`);
         }
 
-        // Load reflection
-        const refEl = document.getElementById('reflection-input');
-        if (refEl && cache.reflection) refEl.value = cache.reflection;
-
+        saveSnapshot();
       } catch (e) {
-        console.error('Supabase load error', e);
-        toast('Could not connect to database — check console 😭');
+        if (e.message !== 'offline') {
+          console.error('Supabase load error', e);
+          toast('Could not load your data, check console 😭');
+        }
       }
 
-      await checkRecurringResets();
+      // Load reflection (from the database or the offline snapshot)
+      const refEl = document.getElementById('reflection-input');
+      if (refEl && cache.reflection) refEl.value = cache.reflection;
+
+      if (!dbOffline) await checkRecurringResets();
 
       // Close any modal that may have been triggered by a tap during JS parse
       document.querySelectorAll('.modal-overlay').forEach(m => m.classList.add('hidden'));
