@@ -1,0 +1,38 @@
+# Supabase pauses free projects after ~7 days without requests (that is what
+# wiped the app in Nov 2026). This pings the database every 3 days.
+# It only reads one row and stores nothing: the repo is public, so never add
+# data backups here.
+#
+# Note: GitHub disables scheduled workflows in a repo with no commits for 60
+# days and emails a warning first. Re-enable it from the Actions tab if so.
+name: keep supabase awake
+
+on:
+  schedule:
+    - cron: '17 3 */3 * *'   # 03:17 UTC every 3 days
+  workflow_dispatch:          # "Run workflow" button for a manual test
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: bunnynote-site/index.html
+          sparse-checkout-cone-mode: false
+      - name: Read one row
+        run: |
+          # Use the same URL and anon key the app ships with, so this never drifts.
+          URL=$(sed -n "s/.*const SB_URL = '\([^']*\)'.*/\1/p" bunnynote-site/index.html)
+          KEY=$(sed -n "s/.*const SB_KEY = '\([^']*\)'.*/\1/p" bunnynote-site/index.html)
+          [ -n "$URL" ] && [ -n "$KEY" ] || { echo "::error::SB_URL/SB_KEY not found in index.html"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+            "$URL/rest/v1/tasks?select=id&limit=1" -H "apikey: $KEY" -H "Authorization: Bearer $KEY")
+          echo "Supabase answered HTTP $code"
+          # After FIX-PLAN Phase 1 (RLS locks out anon) this still counts as activity:
+          # an empty 200 or a 401 both mean the project is awake. Only fail if unreachable.
+          [ "$code" != "000" ] || { echo "::error::Supabase unreachable. Is the project paused?"; exit 1; }
