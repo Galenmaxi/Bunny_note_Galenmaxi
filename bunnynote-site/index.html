@@ -2563,7 +2563,7 @@
     }
     function folderColor(f) { const m = { school: 'bg-[#cce5ff] text-on-tertiary-container', work: 'bg-primary-container text-on-primary-container', personal: 'bg-secondary-container text-on-secondary-container', ideas: 'bg-[#FFF9C4] text-on-surface' }; return m[f] || 'bg-surface-variant text-on-surface'; }
     function folderEmoji(f) { const m = { school: '📘', work: '💼', personal: '🐰', ideas: '💡' }; return m[f] || '📝'; }
-    function addDays(dateStr, days) { const d = new Date(dateStr); d.setDate(d.getDate() + days); return d.toISOString().split('T')[0]; }
+    function addDays(ds, days) { const d = parseDateStr(ds); d.setDate(d.getDate() + days); return dateStr(d); }
     function renderRecentNotes() {
       const notes = cache.notes.filter(n => n.status !== 'done').slice(0, 2);
       const container = document.getElementById('recent-notes');
@@ -2909,7 +2909,7 @@
     let pomDoneNextMode = 'short';
     // reset sessions if new day
     const _pomDate = DB.get('pomDate');
-    const _todayPom = new Date().toISOString().split('T')[0];
+    const _todayPom = todayStr();
     if (_pomDate !== _todayPom) { DB.set('pomSessions', 0); DB.set('pomDate', _todayPom); }
     let pomSessionsToday = DB.get('pomSessions') || 0;
 
@@ -3228,7 +3228,10 @@
       }
     }
     function todayStr() { return dateStr(new Date()) }
-    function dateStr(d) { return d.toISOString().split('T')[0] }
+    // Local calendar date as YYYY-MM-DD. (toISOString() is UTC, which puts early-morning
+    // check-ins in UTC+ timezones on the previous day.)
+    function dateStr(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` }
+    function parseDateStr(s) { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d) }
 
     // ===== KEYBOARD =====
     document.getElementById('new-task-input').addEventListener('keydown', e => { if (e.key === 'Enter') addTask(); });
