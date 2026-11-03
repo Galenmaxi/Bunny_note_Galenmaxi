@@ -1739,7 +1739,9 @@
     // Every helper reports failure: sbGet -> null, sbPost -> null, the rest -> false.
     // Callers must check the result before updating the UI or telling the user it saved.
     async function sbGet(table, params = '') {
-      const url = `${SB_URL}/rest/v1/${table}?select=*&${params}&order=id.asc`;
+      // settings has no id column (key is its primary key); asking for order=id there is a 400.
+      const order = /(^|&)order=/.test(params) ? '' : `&order=${table === 'settings' ? 'key' : 'id'}.asc`;
+      const url = `${SB_URL}/rest/v1/${table}?select=*${params ? '&' + params : ''}${order}`;
       try {
         const res = await fetch(url, { headers: HEADERS });
         if (!res.ok) { const e = await res.text(); console.error(`sbGet ${table} error:`, e); return null; }
