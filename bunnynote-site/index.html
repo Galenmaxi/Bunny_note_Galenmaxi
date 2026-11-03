@@ -1783,9 +1783,24 @@
       } catch (e) { return null; }
     }
     async function sbSetSetting(key, value) {
-      // TODO(FIX-PLAN 4.1): replace with a single upsert once settings.key is unique.
-      if (!await sbDeleteWhere('settings', `key=eq.${encodeURIComponent(key)}`)) return false;
+      // Update in place first; insert only if the key doesn't exist yet. Never deletes, so a
+      // failed save can't lose the old value. (Works whether or not settings.key is unique.)
+      const k = encodeURIComponent(key);
+      try {
+        const res = await fetch(`${SB_URL}/rest/v1/settings?key=eq.${k}`, { method: 'PATCH', headers: { ...HEADERS, 'Prefer': 'return=representation' }, body: JSON.stringify({ value: String(value) }) });
+        if (!res.ok) { console.error('sbSetSetting error', await res.text()); return false; }
+        if ((await res.json()).length) { scheduleSnapshot(); return true; }
+      } catch (e) { console.error('sbSetSetting error:', e); return false; }
       return (await sbPost('settings', { key, value: String(value) })) !== null;
+    }
+
+    // Ignore repeat taps on the same item while its save is still in flight
+    // (a quick double-tap otherwise sends conflicting writes).
+    const inFlight = new Set();
+    async function guarded(key, fn) {
+      if (inFlight.has(key)) return;
+      inFlight.add(key);
+      try { return await fn(); } finally { inFlight.delete(key); }
     }
 
     // ===== SAVE-FAILURE FEEDBACK =====
@@ -1843,6 +1858,8 @@
       const h = el.offsetHeight;
       const header = document.querySelector('header');
       if (header) header.style.top = h + 'px';
+      const due = document.getElementById('due-banner'); // fixed just under the header
+      if (due) due.style.top = (parseFloat(getComputedStyle(due).top) || 56) + h + 'px';
       document.body.style.paddingTop = h + 'px';
     }
 
@@ -1955,10 +1972,11 @@
         creative: document.getElementById('cat-creative').value.trim() || DEFAULT_CATS.creative,
         life: document.getElementById('cat-life').value.trim() || DEFAULT_CATS.life,
       };
-      const ok = await sbSetSetting('name', name) && await sbSetSetting('cats', JSON.stringify(cats));
-      if (!ok) { saveFailed('settings'); return; }
-      cache.name = name;
-      cache.cats = cats;
+      const okName = await sbSetSetting('name', name);
+      if (okName) cache.name = name;
+      const okCats = await sbSetSetting('cats', JSON.stringify(cats));
+      if (okCats) cache.cats = cats;
+      if (!okName || !okCats) { updateGreeting(); updateCategoryLabels(); saveFailed('settings'); return; }
       updateGreeting();
       updateCategoryLabels();
       closeModal('modal-settings');
@@ -2047,33 +2065,43 @@
       if (!confirm(`Import ${n('tasks')} tasks, ${n('notes')} notes, ${n('goals')} goals, ${n('habits')} habits and ${n('projects')} projects?\n\nThis ADDS to what is already here (it doesn't replace anything).`)) return;
 
       showLoading('Importing your backup... 🐰');
-      // Drop ids (the database assigns new ones) and give every row the same keys,
-      // because a bulk insert rejects rows with different key sets.
-      const strip = rows => {
-        const clean = (rows || []).map(({ id, ...rest }) => rest);
-        const keys = [...new Set(clean.flatMap(Object.keys))];
-        const now = new Date().toISOString();
-        return clean.map(r => Object.fromEntries(keys.map(k => [k, r[k] !== undefined ? r[k] : (k === 'created_at' ? now : null)])));
+      // Drop ids (the database assigns new ones). A bulk insert needs every row to have the
+      // same keys, so rows are grouped by key set; missing keys are left out (not set to null)
+      // so the column defaults apply.
+      const arr = v => (Array.isArray(v) ? v : []);
+      const groupsOf = rows => {
+        const groups = {};
+        for (const r of arr(rows)) {
+          if (!r || typeof r !== 'object') continue;
+          const { id, ...rest } = r;
+          const sig = Object.keys(rest).sort().join(',');
+          (groups[sig] ||= []).push(rest);
+        }
+        return Object.values(groups);
       };
       const failed = [];
       try {
         for (const table of ['tasks', 'notes', 'goals', 'projects']) {
-          const rows = strip(d[table]);
-          if (rows.length && (await sbPost(table, rows)) === null) failed.push(table);
+          for (const rows of groupsOf(d[table]))
+            if ((await sbPost(table, rows)) === null) failed.push(`${rows.length} ${table}`);
         }
         // Habits one by one so completions can be pointed at the new habit ids.
         const habitIdMap = {};
-        for (const h of d.habits || []) {
+        for (const h of arr(d.habits)) {
+          if (!h || typeof h !== 'object') continue;
           const { id, ...rest } = h;
           const created = await sbPost('habits', rest);
           if (created) habitIdMap[id] = created.id; else failed.push(`habit "${h.name}"`);
         }
-        const completions = (d.habit_completions || [])
-          .filter(c => habitIdMap[c.habit_id] !== undefined)
+        const completions = arr(d.habit_completions)
+          .filter(c => c && habitIdMap[c.habit_id] !== undefined)
           .map(c => ({ habit_id: habitIdMap[c.habit_id], completed_date: c.completed_date }));
         if (completions.length && (await sbPost('habit_completions', completions)) === null) failed.push('habit history');
-        for (const s of d.settings || [])
-          if (!await sbSetSetting(s.key, s.value)) failed.push(`setting "${s.key}"`);
+        for (const s of arr(d.settings))
+          if (s && s.key && !await sbSetSetting(s.key, s.value)) failed.push(`setting "${s.key}"`);
+      } catch (e) {
+        console.error('import error', e);
+        failed.push('the rest of the file (it looks damaged)');
       } finally {
         hideLoading();
       }
@@ -2244,7 +2272,8 @@
       toast(`🔥 ${streakCount}-day streak! Ka-chow! ⚡`);
     }
 
-    async function toggleHabitToday(id) {
+    function toggleHabitToday(id) { return guarded(`habit${id}@${todayStr()}`, () => toggleHabitTodayNow(id)); }
+    async function toggleHabitTodayNow(id) {
       const today = todayStr();
       if (!cache.habitDots[id]) cache.habitDots[id] = {};
       const done = cache.habitDots[id][today];
@@ -2279,7 +2308,8 @@
     </div>
   `).join('') || '<p class="text-outline text-sm font-body-md">No habits yet — add some! 🐰</p>';
     }
-    async function toggleHabitDay(id, ds) {
+    function toggleHabitDay(id, ds) { return guarded(`habit${id}@${ds}`, () => toggleHabitDayNow(id, ds)); }
+    async function toggleHabitDayNow(id, ds) {
       if (!cache.habitDots[id]) cache.habitDots[id] = {};
       const done = cache.habitDots[id][ds];
       const ok = done
@@ -2310,11 +2340,13 @@
       pushNotif(`New task added: "${text}"`);
       toast('Task added 🐰');
     }
-    async function toggleTask(id) {
+    function toggleTask(id) { return guarded('task' + id, () => toggleTaskNow(id)); }
+    async function toggleTaskNow(id) {
       const t = cache.tasks.find(t => t.id === id);
       if (!t) return;
-      if (!await sbPatch('tasks', id, { done: !t.done })) { saveFailed('the task'); renderTasks(); return; }
-      t.done = !t.done;
+      const next = !t.done;
+      if (!await sbPatch('tasks', id, { done: next })) { saveFailed('the task'); renderTasks(); return; }
+      t.done = next;
       if (t.done && t.recurring) {
         const label = t.recurring === 'daily' ? 'tomorrow' : 'next week';
         toast(`🔁 Recurring task will reappear ${label}!`);
@@ -2747,7 +2779,8 @@
       pushNotif(`New goal: "${title}"`);
       toast('Goal added ⭐');
     }
-    async function updateGoalProgress(id, delta) {
+    function updateGoalProgress(id, delta) { return guarded('goal' + id, () => updateGoalProgressNow(id, delta)); }
+    async function updateGoalProgressNow(id, delta) {
       const g = cache.goals.find(g => g.id === id);
       if (!g) return;
       const next = Math.max(0, Math.min(g.target_val, g.current_val + delta));
